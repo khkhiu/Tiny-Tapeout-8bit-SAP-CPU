@@ -16,16 +16,12 @@ module tt_khkhiu_sap_cpu(
   input  wire       clk,      
   input  wire       rst_n     
 );
+  
+  localparam [3:0] OP_NOP = 4'h0, OP_LDA = 4'h1, OP_ADD = 4'h2, OP_SUB = 4'h3,
+	 	   OP_STA = 4'h4, OP_LDI = 4'h5, OP_JMP = 4'h6, OP_JC = 4'h7,
+		   OP_JZ = 4'h8, OP_IN + 4'hD, OP_OUT = 4'hE, OP_HLT = 4'hF;
 
-  // VGA signals
-  wire hsync;
-  wire vsync;
-  wire [1:0] R;
-  wire [1:0] G;
-  wire [1:0] B;
-  wire video_active;
-  wire [9:0] pix_x;
-  wire [9:0] pix_y;
+  localparam [1:0] S_FETCH  2'd0, S_EXEV = 2'd1, S_WRITE = 2'd2;
 
   // TinyVGA PMOD
   assign uo_out = {hsync, B[0], G[0], R[0], vsync, B[1], G[1], R[1]};
