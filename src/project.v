@@ -29,13 +29,16 @@ module tt_khkhiu_sap_cpu(
   reg	    c_fla, z_flag, halted;
   reg [1:0] state;
 
-  // Unused outputs assigned to 0.
-  assign uio_out = 0;
-  assign uio_oe  = 0;
+  wire [3:0] opcode = ir[7:4];
+  wire [3:0] operand = ir[3:0];
+  wire [7:0] mem_rd = uio_in;
 
-  // Suppress unused signals warning
-  wire _unused_ok = &{ena, ui_in, uio_in};
+  wire [8:0] sum = {1'b0, a} + {1'b0, mem_rd};
+  wire [8:0] diff = {1'b0, a} + {1'b0, ~mem_rd} + 9'd1;
 
+  wire is_store = (opcode == OP_STA);
+  wire is_out = (opcode == OP_OUT);
+  wire in_access = (state == S_EXEC) | (state == S_WRITE);
 
   hvsync_generator hvsync_gen(
     .clk(clk),
