@@ -19,14 +19,14 @@ module tt_khkhiu_sap_cpu(
   
   localparam [3:0] OP_NOP = 4'h0, OP_LDA = 4'h1, OP_ADD = 4'h2, OP_SUB = 4'h3,
 	 	   OP_STA = 4'h4, OP_LDI = 4'h5, OP_JMP = 4'h6, OP_JC = 4'h7,
-		   OP_JZ = 4'h8, OP_IN + 4'hD, OP_OUT = 4'hE, OP_HLT = 4'hF;
+		   OP_JZ = 4'h8, OP_IN = 4'hD, OP_OUT = 4'hE, OP_HLT = 4'hF;
 
-  localparam [1:0] S_FETCH  2'd0, S_EXEV = 2'd1, S_WRITE = 2'd2;
+  localparam [1:0] S_FETCH = 2'd0, S_EXEC = 2'd1, S_WRITE = 2'd2;
 
   reg [3:0] pc;
   reg [7:0] ir;
   reg [7:0] a;
-  reg	    c_fla, z_flag, halted;
+  reg	    c_flag, z_flag, halted;
   reg [1:0] state;
 
   wire [3:0] opcode = ir[7:4];
