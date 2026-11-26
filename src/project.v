@@ -23,8 +23,11 @@ module tt_khkhiu_sap_cpu(
 
   localparam [1:0] S_FETCH  2'd0, S_EXEV = 2'd1, S_WRITE = 2'd2;
 
-  // TinyVGA PMOD
-  assign uo_out = {hsync, B[0], G[0], R[0], vsync, B[1], G[1], R[1]};
+  reg [3:0] pc;
+  reg [7:0] ir;
+  reg [7:0] a;
+  reg	    c_fla, z_flag, halted;
+  reg [1:0] state;
 
   // Unused outputs assigned to 0.
   assign uio_out = 0;
@@ -33,7 +36,6 @@ module tt_khkhiu_sap_cpu(
   // Suppress unused signals warning
   wire _unused_ok = &{ena, ui_in, uio_in};
 
-  reg [9:0] counter;
 
   hvsync_generator hvsync_gen(
     .clk(clk),
