@@ -27,7 +27,7 @@ module tb ();
   wire VGND = 1'b0;
 `endif
 
-  // Replace tt_um_vga_examplewith your module name:
+  // Replace tt_um_vga_example with your module name:
   tt_khkhiu_sap_cpu user_project (
 
       // Include power ports for the Gate Level test:
