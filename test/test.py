@@ -1,127 +1,144 @@
+# SPDX-License-Identifier: Apache-2.0
+# SAP style 8-bit CPU with external memory.
+# A Python memory model stands in for the RP2040. Black-box only (pins, no
+# internal signals) so the same tests run at gate level.
+
 import cocotb
 from cocotb.clock import Clock
-from cocotb.triggers import ClockCycles
+from cocotb.triggers import ClockCycles, FallingEdge, ReadOnly, RisingEdge
 
-import os
-import glob
-import itertools
-from PIL import Image, ImageChops
+NOP, LDA, ADD, SUB, STA, LDI, JMP, JC, JZ, IN, OUT, HLT = (
+    0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0x6, 0x7, 0x8, 0xD, 0xE, 0xF)
 
 
-@cocotb.test()
-async def test_project(dut):
+def ins(op, arg=0):
+    return (op << 4) | (arg & 0xF)
 
-    # Set clock period to 40 ns (25 MHz)
-    CLOCK_PERIOD = 40
 
-    # Set VGA timing parameters matching hvsync_generator.v
-    H_DISPLAY = 640
-    H_FRONT   =  16
-    H_SYNC    =  96
-    H_BACK    =  48
-    V_DISPLAY = 480
-    V_FRONT   =  10
-    V_SYNC    =   2
-    V_BACK    =  33
+FIB_PROGRAM = [
+    ins(LDI, 0), ins(STA, 14), ins(OUT), ins(LDI, 1), ins(STA, 15), ins(OUT),
+    ins(ADD, 14), ins(JC, 0), ins(STA, 14), ins(OUT), ins(ADD, 15), ins(JC, 0),
+    ins(STA, 15), ins(JMP, 5), 0x00, 0x00,
+]
+FIB_SEQUENCE = [0, 1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233]
 
-    # Number of frames to capture
-    CAPTURE_FRAMES = 3
 
-    # Derived constants
-    H_SYNC_START = H_DISPLAY + H_FRONT
-    H_SYNC_END = H_SYNC_START + H_SYNC
-    H_TOTAL = H_SYNC_END + H_BACK
-    V_SYNC_START = V_DISPLAY + V_FRONT
-    V_SYNC_END = V_SYNC_START + V_SYNC
-    V_TOTAL = V_SYNC_END + V_BACK
+class Memory:
+    """What the RP2040 does: serve reads, capture writes and OUT, never fight the chip."""
 
-    # Palette mapping uo_out values to RGB color
-    # uo_out = {hsync, B[0], G[0], R[0], vsync, B[1], G[1], R[1]}
-    palette = [bytes(3)] * 256
-    for r1, r0, g1, g0, b1, b0 in itertools.product(range(2), repeat=6):
-        red = 170*r1 + 85*r0
-        green = 170*g1 + 85*g0
-        blue = 170*b1 + 85*b0
-        color_index = b0<<6|g0<<5|r0<<4|b1<<2|g1<<1|r1<<0
-        for sync_bits in (0x00, 0x08, 0x80, 0x88):
-            palette[color_index | sync_bits] = bytes((red, green, blue))
+    def __init__(self, dut, program):
+        self.dut = dut
+        self.mem = list(program) + [0] * (16 - len(program))
+        self.outputs = []
+        self.driving = False
 
-    # Set up the clock
-    clock = Clock(dut.clk, CLOCK_PERIOD, unit="ns")
-    cocotb.start_soon(clock.start())
+    async def serve(self):
+        dut = self.dut
+        while True:
+            await FallingEdge(dut.clk)
+            uo = int(dut.uo_out.value)
+            addr, we, out_stb = uo & 0xF, (uo >> 4) & 1, (uo >> 5) & 1
+            oe = int(dut.uio_oe.value)
+            assert oe in (0x00, 0xFF), f"partial uio_oe {oe:#x}"
+            assert not (oe and self.driving), "bus contention: chip and memory both driving uio"
 
-    # Reset the design
+            if oe:  # chip is driving the bus this cycle
+                data = int(dut.uio_out.value)
+                if we:
+                    self.mem[addr] = data
+                if out_stb:
+                    self.outputs.append(data)
+
+            self.driving = not (we or out_stb)
+            if self.driving:
+                dut.uio_in.value = self.mem[addr]
+
+
+def status(dut):
+    uo = int(dut.uo_out.value)
+    return {"halted": (uo >> 7) & 1, "fetch": (uo >> 6) & 1}
+
+
+async def start(dut, program, ui=0):
+    cocotb.start_soon(Clock(dut.clk, 20, unit="ns").start())
+    mem = Memory(dut, program)
     dut.ena.value = 1
-    dut.ui_in.value = 0
+    dut.ui_in.value = ui
     dut.uio_in.value = 0
     dut.rst_n.value = 0
-    await ClockCycles(dut.clk, 10)
+    await ClockCycles(dut.clk, 5)
+    cocotb.start_soon(mem.serve())
     dut.rst_n.value = 1
-    await ClockCycles(dut.clk, 2)
+    return mem
 
-    # Define some functions for capturing lines & frames
 
-    async def check_line(expected_vsync):
-        for i in range(H_TOTAL):
-            hsync = int(dut.uo_out.value[7])
-            vsync = int(dut.uo_out.value[3])
-            assert hsync == (0 if H_SYNC_START <= i < H_SYNC_END else 1), "Unexpected hsync pattern"
-            assert vsync == expected_vsync, "Unexpected vsync pattern"
-            await ClockCycles(dut.clk, 1)
-
-    async def capture_line(framebuffer, offset):
-        for i in range(H_TOTAL):
-            hsync = int(dut.uo_out.value[7])
-            vsync = int(dut.uo_out.value[3])
-            assert hsync == (0 if H_SYNC_START <= i < H_SYNC_END else 1), "Unexpected hsync pattern"
-            assert vsync == 1, "Unexpected vsync pattern"
-            if i < H_DISPLAY:
-                framebuffer[offset+3*i:offset+3*i+3] = palette[int(dut.uo_out.value)]
-            await ClockCycles(dut.clk, 1)
-
-    async def skip_frame(frame_num):
-        dut._log.info(f"Skipping frame {frame_num}")
-        await ClockCycles(dut.clk, H_TOTAL*V_TOTAL)
-
-    async def capture_frame(frame_num, check_sync=True):
-        framebuffer = bytearray(V_DISPLAY*H_DISPLAY*3)
-        for j in range(V_DISPLAY):
-            dut._log.info(f"Frame {frame_num}, line {j} (display)")
-            line = await capture_line(framebuffer, 3*j*H_DISPLAY)
-        if check_sync:
-            for j in range(j, j+V_FRONT):
-                dut._log.info(f"Frame {frame_num}, line {j} (front porch)")
-                await check_line(1)
-            for j in range(j, j+V_SYNC):
-                dut._log.info(f"Frame {frame_num}, line {j} (sync pulse)")
-                await check_line(0)
-            for j in range(j, j+V_BACK):
-                dut._log.info(f"Frame {frame_num}, line {j} (back porch)")
-                await check_line(1)
-        else:
-            dut._log.info(f"Frame {frame_num}, skipping non-display lines")
-            await ClockCycles(dut.clk, H_TOTAL*(V_TOTAL-V_DISPLAY))
-        frame = Image.frombytes('RGB', (H_DISPLAY, V_DISPLAY), bytes(framebuffer))
-        return frame
-
-    # Start capturing
-
-    os.makedirs("output", exist_ok=True)
-
-    for i in range(CAPTURE_FRAMES):
-        frame = await capture_frame(i)
-        frame.save(f"output/frame{i}.png")
+async def run_until_halt(dut, limit=2000):
+    for _ in range(limit):
+        await ClockCycles(dut.clk, 1)
+        if status(dut)["halted"]:
+            return
+    raise AssertionError("CPU did not halt")
 
 
 @cocotb.test()
-async def compare_reference(dut):
+async def test_fibonacci(dut):
+    """Prints Fibonacci, wraps to 0 on overflow, keeps going."""
+    mem = await start(dut, FIB_PROGRAM)
+    await ClockCycles(dut.clk, 400)
+    expected = FIB_SEQUENCE + FIB_SEQUENCE[:5]
+    dut._log.info(f"OUT: {mem.outputs}")
+    assert mem.outputs[:len(expected)] == expected
+    assert not status(dut)["halted"]
 
-    for img in glob.glob("output/frame*.png"):
-        basename = img.removeprefix("output/")
-        dut._log.info(f"Comparing {basename} to reference image")
-        frame = Image.open(img)
-        ref = Image.open(f"reference/{basename}")
-        diff = ImageChops.difference(frame, ref)
-        if diff.getbbox() is not None:
-            diff.save(f"output/diff_{basename}")
-            assert False, f"Rendered {basename} differs from reference image"
+
+@cocotb.test()
+async def test_sub_jc_hlt(dut):
+    """Count down from 10 by 3; halt when SUB borrows (C = 0)."""
+    prog = [0] * 16
+    prog[0:8] = [ins(LDA, 14), ins(OUT), ins(SUB, 15), ins(JC, 5), ins(HLT),
+                 ins(STA, 13), ins(LDA, 13), ins(JMP, 1)]
+    prog[14], prog[15] = 10, 3
+    mem = await start(dut, prog)
+    await run_until_halt(dut)
+    assert mem.outputs == [10, 7, 4, 1]
+    assert mem.mem[13] == 1, "STA did not write memory"
+    n = len(mem.outputs)
+    await ClockCycles(dut.clk, 50)
+    assert status(dut)["halted"] and len(mem.outputs) == n
+
+
+@cocotb.test()
+async def test_jz(dut):
+    """Count down to zero by 2 using JZ."""
+    prog = [0] * 16
+    prog[0:8] = [ins(LDA, 15), ins(OUT), ins(SUB, 14), ins(JZ, 6), ins(JMP, 1),
+                 ins(NOP), ins(OUT), ins(HLT)]
+    prog[14], prog[15] = 2, 6
+    mem = await start(dut, prog)
+    await run_until_halt(dut)
+    assert mem.outputs == [6, 4, 2, 0]
+
+
+@cocotb.test()
+async def test_in_port(dut):
+    """IN reads the switches on ui_in."""
+    prog = [ins(IN), ins(OUT), ins(ADD, 15), ins(OUT), ins(HLT)] + [0] * 10 + [1]
+    mem = await start(dut, prog, ui=0x41)
+    await run_until_halt(dut)
+    assert mem.outputs == [0x41, 0x42]
+
+
+@cocotb.test()
+async def test_cycle_counts(dut):
+    """2 cycles per instruction, 3 for STA and OUT."""
+    prog = [ins(NOP), ins(NOP), ins(STA, 15), ins(OUT), ins(HLT)] + [0] * 11
+    await start(dut, prog)
+    cycles = 0
+    while True:
+        await RisingEdge(dut.clk)
+        await ReadOnly()  # sample after the flops have updated
+        cycles += 1
+        if status(dut)["halted"]:
+            break
+        assert cycles < 100
+    assert cycles == 2 + 2 + 3 + 3 + 2, f"took {cycles} cycles"
