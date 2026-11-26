@@ -40,31 +40,56 @@ module tt_khkhiu_sap_cpu(
   wire is_out = (opcode == OP_OUT);
   wire in_access = (state == S_EXEC) | (state == S_WRITE);
 
-  hvsync_generator hvsync_gen(
-    .clk(clk),
-    .reset(~rst_n),
-    .hsync(hsync),
-    .vsync(vsync),
-    .display_on(video_active),
-    .hpos(pix_x),
-    .vpos(pix_y)
-  );
-  
-  wire [9:0] moving_x = pix_x * counter;
 
-  assign R = video_active ? {moving_x[5], pix_y[2]} : 2'b00;
-  assign G = video_active ? {moving_x[6], pix_y[2]} : 2'b00;
-  assign B = video_active ? {moving_x[7], pix_y[5]} : 2'b00;
-  
-  always @(posedge vsync, negedge rst_n) begin
-    if (~rst_n) begin
-      counter <= 0;
-    end else begin
-      counter <= counter + 1;
+  always @(posedge clk) begin
+    if (!rst_n) begin
+      pc     <= 4'd0;
+      ir     <= 8'd0;
+      a      <= 8'd0;
+      c_flag <= 1'b0;
+      z_flag <= 1'b0;
+      halted <= 1'b0;
+      state  <= S_FETCH;
+    end else if (!halted) begin
+      case (state)
+        S_FETCH: begin
+          ir    <= mem_rd;
+          pc    <= pc + 4'd1;
+          state <= S_EXEC;
+        end
+
+        S_EXEC: begin
+          state <= (is_store | is_out) ? S_WRITE : S_FETCH;
+          case (opcode)
+            OP_LDA: a <= mem_rd;
+            OP_ADD: begin a <= sum[7:0];  c_flag <= sum[8];  z_flag <= (sum[7:0]  == 8'd0); end
+            OP_SUB: begin a <= diff[7:0]; c_flag <= diff[8]; z_flag <= (diff[7:0] == 8'd0); end
+            OP_LDI: a <= {4'd0, operand};
+            OP_JMP: pc <= operand;
+            OP_JC:  if (c_flag) pc <= operand;
+            OP_JZ:  if (z_flag) pc <= operand;
+            OP_IN:  a <= ui_in;
+            OP_HLT: halted <= 1'b1;
+            default: ;  // NOP, STA/OUT (finish in S_WRITE), unused opcodes
+          endcase
+        end
+
+        default: begin  // S_WRITE: chip drives A onto the bus
+          state <= S_FETCH;
+        end
+      endcase
     end
   end
+  wire [3:0] addr = (state == S_FETCH) ? pc : operand;
 
-  // Suppress unused signals warning
-  wire _unused_ok_ = &{moving_x, pix_y};
+  assign uo_out  = {halted,
+                    (state == S_FETCH) & ~halted,
+                    in_access & is_out,
+                    in_access & is_store,
+                    addr};
+  assign uio_out = a;
+  assign uio_oe  = (state == S_WRITE) ? 8'hFF : 8'h00;
+
+  wire _unused = &{ena, 1'b0};
 
 endmodule
